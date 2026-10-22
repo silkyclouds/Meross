@@ -1,6 +1,7 @@
 import fetch from 'node-fetch';
 import { Request } from 'node-fetch';
 import Encryption from '../encryption.js';
+import { lenientFetch } from './lenient-fetch.js';
 import {
   type TransportOptions,
   Transport,
@@ -26,7 +27,9 @@ export class HTTPTransport extends Transport {
     super(options);
     this.url = options.url;
     this.id = `${this.url}`;
-    this.fetch = options.fetch ?? fetch;
+    // Devices answer with a status line that Node's HTTP parser rejects, so the
+    // tolerant reader is the default. Callers can still inject their own.
+    this.fetch = options.fetch ?? (lenientFetch as unknown as typeof fetch);
 
     httpLogger.debug(`HTTPTransport initialized with URL: ${this.url}`);
   }
