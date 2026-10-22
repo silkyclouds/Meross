@@ -106,6 +106,32 @@ A device refused this way wipes its Wi-Fi configuration after a few attempts
 and returns to pairing mode. Nothing is broken; run the script again once the
 account is right.
 
+## Two traps after pairing, both handled by the script
+
+These are the ones that make a working setup look broken, or a broken one look
+fine. The script walks through both at the end.
+
+**A metering device reports zeroes until it has been power cycled.** Current,
+energy, power and voltage all sit at `0.0`, voltage included, which is the
+giveaway: a plug that is really measuring never reports zero volts. Setting the
+clock and timezone is not enough on its own, and there is no reboot command in
+the ability list, so the device has to be unplugged and plugged back in by
+hand. The script asks you to do it, then reads the voltage back and tells you
+whether it worked.
+
+**The integration must be told to use MQTT.** `meross_lan` defaults its
+connection protocol to `auto`, and auto prefers HTTP whenever it knows the
+device address. The device still connects to your broker, still authenticates,
+still shows up as a connected client, and publishes nothing, while the entities
+keep updating over HTTP. Everything looks healthy and the broker is unused. Set
+the protocol to `mqtt` in the device options. The script can do it through the
+Home Assistant API with a long lived access token, and prints the manual steps
+if you would rather not hand one over.
+
+You can tell the difference by subscribing to `/appliance/#` on your broker.
+On MQTT you see `Appliance.Control.Electricity`, `Appliance.Control.ConsumptionX`
+and `Appliance.System.Runtime` going past. On HTTP you see nothing at all.
+
 ## After pairing
 
 The device now publishes to your broker on

@@ -11,6 +11,8 @@ SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/lib/ui.sh"
 source "$SCRIPT_DIR/lib/wifi.sh"
 source "$SCRIPT_DIR/lib/broker.sh"
+source "$SCRIPT_DIR/lib/device.sh"
+source "$SCRIPT_DIR/lib/homeassistant.sh"
 
 CLI="$SCRIPT_DIR/../packages/cli/dist/meross.js"
 SCANNER="$SCRIPT_DIR/scan-networks.swift"
@@ -25,7 +27,7 @@ USER_ID=0
 
 check_requirements() {
   local missing=0
-  for tool in node openssl swift nc; do
+  for tool in node openssl swift nc python3; do
     command -v "$tool" >/dev/null 2>&1 || { ui_error "$tool is required"; missing=1; }
   done
   if [[ ! -f "$CLI" ]]; then
@@ -206,9 +208,81 @@ main() {
   ui_wait_for 120 "waiting for the device to report" \
     nc -z -G 3 "$BROKER_HOST" "$BROKER_PORT" >/dev/null 2>&1
 
+  wake_up_metering
+  configure_home_assistant
+
   ui_info "Report written to $REPORT"
   ui_info "Shared key for your integration is in $KEY_FILE"
   print -r -- ""
+}
+
+# A metering device reports zeroes for everything, voltage included, until it
+# has restarted once with its clock and timezone set. There is no reboot
+# command in its ability list, so the power cycle has to be done by hand. The
+# script at least confirms the result instead of leaving you guessing.
+wake_up_metering() {
+  ui_section "Metering"
+
+  local address voltage
+  address=$(node "$CLI" info --ip "$DEVICE_AP_ADDRESS" 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | tail -1)
+  [[ -z "$address" ]] && { printf "Address the device took on your network (blank to skip): "; read address; }
+  [[ -z "$address" ]] && return 0
+
+  if device_metering_is_live "$address" "$SHARED_KEY"; then
+    voltage=$(device_read_voltage "$address" "$SHARED_KEY")
+    ui_ok "Metering already live, reading $voltage V"
+    return 0
+  fi
+
+  ui_info "The device reports no voltage yet. This is expected on a first pairing."
+  ui_info "Unplug it, wait a few seconds, and plug it back in."
+  ui_confirm "Done?" y || { ui_warn "Skipped. Power cycle it later or readings stay at zero."; return 0; }
+
+  if ui_wait_for 120 "waiting for metering" device_metering_is_live "$address" "$SHARED_KEY"; then
+    voltage=$(device_read_voltage "$address" "$SHARED_KEY")
+    ui_ok "Metering is live, reading $voltage V"
+  else
+    ui_warn "Still no reading. Give it a minute, then check the voltage sensor."
+  fi
+}
+
+# Without this, the integration polls over HTTP and the broker stays idle while
+# everything looks fine. See lib/homeassistant.sh for why.
+configure_home_assistant() {
+  ui_section "Home Assistant"
+
+  if ! ui_confirm "Set the meross_lan connection protocol to mqtt now?" y; then
+    ha_print_manual_steps
+    return 0
+  fi
+
+  printf "Home Assistant URL [http://%s:8123]: " "$BROKER_HOST"
+  read HA_URL
+  HA_URL="${HA_URL:-http://$BROKER_HOST:8123}"
+  HA_TOKEN=$(ui_read_secret "Long lived access token (hidden, blank to skip):")
+
+  if [[ -z "$HA_TOKEN" ]] || ! ha_is_reachable; then
+    ui_warn "No usable token, falling back to manual steps."
+    ha_print_manual_steps
+    return 0
+  fi
+
+  local uuid entry_id
+  uuid=$(node "$CLI" info --ip "$DEVICE_AP_ADDRESS" 2>/dev/null | grep -oE '[0-9a-f]{20,}' | head -1)
+  entry_id=$(ha_find_entry "${uuid:-$FRIENDLY_NAME}")
+
+  if [[ -z "$entry_id" ]]; then
+    ui_warn "The device is not in meross_lan yet. Add it there, then set the protocol."
+    ha_print_manual_steps
+    return 0
+  fi
+
+  if ha_force_mqtt_protocol "$entry_id"; then
+    ui_ok "Connection protocol set to mqtt"
+  else
+    ui_warn "Could not change it automatically."
+    ha_print_manual_steps
+  fi
 }
 
 main "$@"
